@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flat Alert</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c2230; --mute:#667085; --line:#e4e7ec; --accent:#1d6fe5; --new:#e8f2ff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#12151c; --card:#1b2029; --text:#e8ecf3; --mute:#98a2b3; --line:#2a3140; --accent:#6ea8ff; --new:#1c2a44; } }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:0 16px 40px; background:var(--bg); color:var(--text); font:15px/1.45 system-ui,sans-serif; }
+  main { max-width:760px; margin:0 auto; }
+  h1 { font-size:22px; margin:24px 0 4px; }
+  .sub { color:var(--mute); margin:0 0 16px; }
+  .box { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:16px; }
+  .box h2 { font-size:15px; margin:0 0 6px; }
+  code { background:var(--bg); padding:2px 6px; border-radius:6px; word-break:break-all; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:8px 14px; font-size:14px; cursor:pointer; }
+  .card { display:flex; gap:12px; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px; margin-bottom:10px; text-decoration:none; color:inherit; }
+  .card.fresh { background:var(--new); }
+  .card img { width:96px; height:72px; object-fit:cover; border-radius:8px; flex:none; background:var(--line); }
+  .price { font-weight:700; font-size:17px; }
+  .meta { color:var(--mute); font-size:13px; }
+  .t { font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .err { color:#d92d20; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Flat Alert</h1>
+  <p class="sub" id="status">Loading…</p>
+
+  <div class="box">
+    <h2>Phone notifications (Android)</h2>
+    <ol style="margin:6px 0 10px;padding-left:20px">
+      <li>Install the free <b>ntfy</b> app from Google Play.</li>
+      <li>Tap <b>+</b> and subscribe to topic: <code id="topic"></code> (default server).</li>
+      <li>Tap the button to check the pop-up arrives.</li>
+    </ol>
+    <button id="test">Send test notification</button> <span id="testres" class="meta"></span>
+  </div>
+
+  <div id="list"></div>
+</main>
+<script>
+const fmt = n => n == null ? '–' : n.toLocaleString('pl-PL');
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function load() {
+  const d = await (await fetch('/api/listings')).json();
+  document.getElementById('topic').textContent = d.topic;
+  const s = d.state;
+  document.getElementById('status').innerHTML =
+    `Ursynów · Imielin · Natolin · up to ${fmt(d.priceMax)} zł · ${d.listings.length} tracked · last check ${s.lastRun ? new Date(s.lastRun).toLocaleTimeString() : 'pending'}` +
+    (s.lastError ? ` · <span class="err">${esc(s.lastError)}</span>` : '');
+  const dayAgo = Date.now() - 864e5;
+  document.getElementById('list').innerHTML = d.listings.map(l => `
+    <a class="card ${new Date(l.firstSeen) > dayAgo ? 'fresh' : ''}" href="${esc(l.url)}" target="_blank" rel="noopener">
+      ${l.image ? `<img src="${esc(l.image)}" alt="" loading="lazy">` : '<img alt="">'}
+      <div style="min-width:0">
+        <div class="price">${fmt(l.price)} zł <span class="meta">· ${fmt(l.pricePerM2)} zł/m²</span></div>
+        <div class="meta">${l.area ?? '?'} m² · ${l.rooms ?? '?'} pok. · ${esc(l.sub)}${l.street ? ' · ' + esc(l.street) : ''}</div>
+        <div class="t">${esc(l.title)}</div>
+        <div class="meta">first seen ${new Date(l.firstSeen).toLocaleString()}</div>
+      </div>
+    </a>`).join('');
+}
+document.getElementById('test').onclick = async () => {
+  const r = await (await fetch('/api/test', { method: 'POST' })).json();
+  document.getElementById('testres').textContent = r.ok ? 'Sent.' : 'Failed: ' + r.error;
+};
+load(); setInterval(load, 30000);
+</script>
+</body>
+</html>
