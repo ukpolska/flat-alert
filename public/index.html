@@ -47,10 +47,11 @@ const fmt = n => n == null ? '–' : n.toLocaleString('pl-PL');
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 async function load() {
   const d = await (await fetch('/api/listings')).json();
+  d.listings = d.listings.filter(l => !l.duplicateOf);
   document.getElementById('topic').textContent = d.topic;
   const s = d.state;
   document.getElementById('status').innerHTML =
-    `Ursynów · Imielin · Natolin · up to ${fmt(d.priceMax)} zł · ${d.listings.length} tracked · last check ${s.lastRun ? new Date(s.lastRun).toLocaleTimeString() : 'pending'}` +
+    `Otodom · Morizon · Gratka · Ursynów · up to ${fmt(d.priceMax)} zł · ${d.listings.length} tracked · last check ${s.lastRun ? new Date(s.lastRun).toLocaleTimeString() : 'pending'}` +
     (s.lastError ? ` · <span class="err">${esc(s.lastError)}</span>` : '');
   const dayAgo = Date.now() - 864e5;
   document.getElementById('list').innerHTML = d.listings.map(l => `
@@ -58,7 +59,7 @@ async function load() {
       ${l.image ? `<img src="${esc(l.image)}" alt="" loading="lazy">` : '<img alt="">'}
       <div style="min-width:0">
         <div class="price">${fmt(l.price)} zł <span class="meta">· ${fmt(l.pricePerM2)} zł/m²</span></div>
-        <div class="meta">${l.area ?? '?'} m² · ${l.rooms ?? '?'} pok. · ${esc(l.sub)}${l.street ? ' · ' + esc(l.street) : ''}</div>
+        <div class="meta">${l.area ?? '?'} m² · ${l.rooms ?? '?'} pok. · ${esc(l.sub)}${l.street ? ' · ' + esc(l.street) : ''} · ${esc(l.source || '')}</div>
         <div class="t">${esc(l.title)}</div>
         <div class="meta">first seen ${new Date(l.firstSeen).toLocaleString()}</div>
       </div>

@@ -18,8 +18,9 @@ async function poll() {
   try {
     const r = await runOnce(db);
     fs.writeFileSync(DB_FILE, JSON.stringify(db));
-    state.lastRun = r.now; state.lastCount = r.found; state.lastError = r.notifyError;
-    console.log(`${r.now} matched=${r.found} new=${r.seed ? '(seeded)' : r.fresh}`);
+    state.lastRun = r.now; state.lastCount = Object.values(r.counts).reduce((a, b) => a + b, 0);
+    state.lastError = r.notifyError || Object.entries(r.errors).map(([n, e]) => `${n}: ${e}`).join('; ') || null;
+    console.log(`${r.now} counts=${JSON.stringify(r.counts)} new=${r.fresh} seeded=[${r.seeded}]`);
   } catch (e) {
     state.lastError = e.message;
     console.error(new Date().toISOString(), e.message);

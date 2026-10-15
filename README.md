@@ -1,6 +1,6 @@
 # Flat Alert – free always-on setup (GitHub Actions)
 
-Checks Otodom every ~7 minutes for flats in Ursynów (incl. Imielin, Natolin) up to 800,000 zł
+Checks Otodom, Morizon and Gratka (same flat on several sites = one alert) every ~7 minutes for flats in Ursynów (incl. Imielin, Natolin) up to 800,000 zł
 and pushes new ones to an ntfy topic. Runs on GitHub's servers – no PC needed.
 
 ## One-time setup (you, ~10 minutes)

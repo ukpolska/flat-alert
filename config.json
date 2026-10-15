@@ -1,6 +1,7 @@
 {
   "ntfyTopic": "set-via-NTFY_TOPIC-secret",
   "ntfyServer": "https://ntfy.sh",
+  "sources": ["otodom", "morizon", "gratka"],
   "priceMax": 800000,
   "intervalMinutes": 5,
   "maxPages": 4,

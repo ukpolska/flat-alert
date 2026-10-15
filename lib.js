@@ -1,59 +1,21 @@
-// Shared logic: fetch Otodom, filter, normalise, notify via ntfy.
+// Shared logic: run all sources, drop cross-site duplicates, notify via ntfy.
 const fs = require('fs');
 const path = require('path');
+const sources = require('./sources');
 
 const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
 if (process.env.NTFY_TOPIC) cfg.ntfyTopic = process.env.NTFY_TOPIC; // keeps the topic out of a public repo
 
-const UA = 'Mozilla/5.0 (personal listing alert; low-frequency)';
 const BASE = 'https://www.otodom.pl';
-const SEARCH = `${BASE}/pl/wyniki/sprzedaz/mieszkanie/mazowieckie/warszawa/warszawa/warszawa/ursynow`;
-const ROOMS = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5, SIX: 6 };
-const names = (it, level) => (it.location?.reverseGeocoding?.locations || [])
-  .filter(l => l.locationLevel === level).map(l => l.name);
-
-function matches(it) {
-  const area = names(it, 'residential').join(' ').toLowerCase();
-  if (cfg.excludeAreas.some(x => area.includes(x.toLowerCase()))) return false;
-  return names(it, 'district').includes(cfg.districtName)
-    || cfg.extraAreaMatches.some(x => area.includes(x.toLowerCase()));
-}
-
-function normalise(it) {
-  return {
-    id: String(it.id),
-    title: it.title,
-    price: it.totalPrice?.value ?? null,
-    area: it.areaInSquareMeters ?? null,
-    rooms: ROOMS[it.roomsNumber] ?? null,
-    pricePerM2: it.pricePerSquareMeter?.value ? Math.round(it.pricePerSquareMeter.value) : null,
-    sub: names(it, 'residential').join(', '),
-    street: it.location?.address?.street?.name || '',
-    created: it.createdAtFirst || it.dateCreated,
-    url: `${BASE}/pl/oferta/${it.slug}`,
-    image: it.images?.[0]?.medium || null,
-  };
-}
-
-async function fetchPage(page) {
-  const q = new URLSearchParams({
-    limit: '72', priceMax: String(cfg.priceMax), by: 'LATEST', direction: 'DESC', page: String(page),
-  });
-  const res = await fetch(`${SEARCH}?${q}`, { headers: { 'User-Agent': UA, 'Accept-Language': 'pl' } });
-  if (!res.ok) throw new Error(`Otodom HTTP ${res.status}`);
-  const html = await res.text();
-  const m = html.match(/<script id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/s);
-  if (!m) throw new Error('Otodom page had no listing data (layout changed or blocked)');
-  const ads = JSON.parse(m[1]).props.pageProps.data.searchAds;
-  return { items: ads.items, totalPages: ads.pagination.totalPages };
-}
-
+const LABEL = { otodom: 'Otodom', olx: 'OLX', morizon: 'Morizon', gratka: 'Gratka' };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 const b64 = s => `=?UTF-8?B?${Buffer.from(s, 'utf8').toString('base64')}?=`;
 
 async function notify(l, isTest = false) {
   const price = l.price ? `${l.price.toLocaleString('pl-PL')} zł` : 'cena brak';
   const body = [`${l.area ?? '?'} m² · ${l.rooms ?? '?'} pok. · ${l.pricePerM2 ?? '?'} zł/m²`,
-    [l.sub, l.street].filter(Boolean).join(' · ')].join('\n');
+    [l.sub, l.street].filter(Boolean).join(' · '),
+    `Źródło: ${LABEL[l.source] || l.source || 'test'}`].join('\n');
   const res = await fetch(`${cfg.ntfyServer}/${cfg.ntfyTopic}`, {
     method: 'POST',
     headers: { Title: b64(`${isTest ? '[TEST] ' : 'Nowe: '}${price}`), Priority: '4', Tags: 'house', Click: l.url },
@@ -62,32 +24,62 @@ async function notify(l, isTest = false) {
   if (!res.ok) throw new Error(`ntfy HTTP ${res.status}`);
 }
 
-// One check. Mutates db; the first ever run records listings silently.
-async function runOnce(db, { send = true } = {}) {
-  const found = [];
-  const ids = new Set();
-  let totalPages = 1;
-  for (let p = 1; p <= Math.min(totalPages, cfg.maxPages); p++) {
-    const r = await fetchPage(p);
-    totalPages = r.totalPages;
-    for (const it of r.items) {
-      if (it.estate === 'FLAT' && matches(it) && !ids.has(String(it.id))) { ids.add(String(it.id)); found.push(normalise(it)); }
-    }
-    if (p < Math.min(totalPages, cfg.maxPages)) await new Promise(r => setTimeout(r, 2000));
+// Same flat on another portal: same price and (nearly) the same area. Only compared across
+// different sources, so two different flats on one portal are never merged.
+const sameFlat = (a, b) => a.source !== b.source && a.price != null && a.price === b.price
+  && a.area != null && b.area != null && Math.abs(a.area - b.area) <= 0.6;
+
+function migrate(db) {
+  db.sources = db.sources || {};
+  if (db.initialized && !db.sources.otodom) db.sources.otodom = true; // state from the Otodom-only version
+  for (const [oldId, l] of Object.entries({ ...db.listings })) {
+    if (l.source) continue;
+    delete db.listings[oldId];
+    db.listings[`otodom:${l.id}`] = { ...l, source: 'otodom' };
   }
-  const fresh = found.filter(l => !db.listings[l.id]);
+}
+
+// One check. Mutates db. A source seen for the first time is recorded silently, so adding a
+// portal never floods the phone with its existing listings.
+async function runOnce(db, { send = true } = {}) {
+  migrate(db);
   const now = new Date().toISOString();
-  for (const l of fresh) db.listings[l.id] = { ...l, firstSeen: now };
-  const seed = !db.initialized;
+  const errors = {}, counts = {}, seeded = [];
+  const fresh = [];
+  const known = Object.values(db.listings);
+  let first = true;
+  for (const name of cfg.sources) {
+    if (!first) await sleep(2000);
+    first = false;
+    let list;
+    try { list = await sources[name](cfg); } catch (e) { errors[name] = e.message; continue; }
+    counts[name] = list.length;
+    const seed = !db.sources[name];
+    if (seed) seeded.push(name);
+    for (const raw of list) {
+      const gid = `${name}:${raw.id}`;
+      if (db.listings[gid]) continue;
+      const l = { ...raw, id: raw.id, source: name, firstSeen: now };
+      // One-to-one matching: an original can be the twin of at most one listing per other site,
+      // so a developer's identical units are never mistaken for copies of each other.
+      const dup = known.find(k => !k.duplicateOf && sameFlat(k, l) && !(k.twinSources || []).includes(name));
+      if (dup) { l.duplicateOf = `${dup.source}:${dup.id}`; (dup.twinSources ||= []).push(name); }
+      db.listings[gid] = l;
+      known.push(l);
+      if (!seed && !dup) fresh.push(l);
+    }
+    db.sources[name] = true;
+  }
   db.initialized = true;
   db.lastCheck = now;
+  db.errors = errors;
   let notifyError = null;
-  if (!seed && send) {
+  if (send) {
     for (const l of [...fresh].reverse()) { // oldest first, newest ends on top
       try { await notify(l); } catch (e) { notifyError = 'ntfy: ' + e.message; }
     }
   }
-  return { found: found.length, fresh: fresh.length, seed, now, notifyError };
+  return { now, counts, errors, seeded, fresh: fresh.length, notifyError };
 }
 
 module.exports = { cfg, runOnce, notify, BASE };
