@@ -24,6 +24,22 @@ async function notify(l, isTest = false) {
   if (!res.ok) throw new Error(`ntfy HTTP ${res.status}`);
 }
 
+// Links already pushed to the phone in the last 12 h (ntfy keeps messages that long). This lets the PC
+// copy and the GitHub copy of the checker share one "already sent" memory with no shared storage.
+// If ntfy can't be read, we return an empty set: a rare repeat is better than a missed flat.
+async function sentRecently() {
+  try {
+    const res = await fetch(`${cfg.ntfyServer}/${cfg.ntfyTopic}/json?poll=1&since=12h`);
+    if (!res.ok) return new Set();
+    const urls = new Set();
+    for (const line of (await res.text()).split('\n')) {
+      if (!line.trim()) continue;
+      try { const m = JSON.parse(line); if (m.click) urls.add(m.click); } catch {}
+    }
+    return urls;
+  } catch { return new Set(); }
+}
+
 // Same flat on another portal: same price and (nearly) the same area. Only compared across
 // different sources, so two different flats on one portal are never merged.
 const sameFlat = (a, b) => a.source !== b.source && a.price != null && a.price === b.price
@@ -62,8 +78,11 @@ async function runOnce(db, { send = true } = {}) {
       const l = { ...raw, id: raw.id, source: name, firstSeen: now };
       // One-to-one matching: an original can be the twin of at most one listing per other site,
       // so a developer's identical units are never mistaken for copies of each other.
-      const dup = known.find(k => !k.duplicateOf && sameFlat(k, l) && !(k.twinSources || []).includes(name));
-      if (dup) { l.duplicateOf = `${dup.source}:${dup.id}`; (dup.twinSources ||= []).push(name); }
+      // Otodom sometimes returns one advert twice under different ids (e.g. 9000…); the page URL is the truth.
+      const sameAd = known.find(k => k.url === l.url);
+      const dup = sameAd || known.find(k => !k.duplicateOf && sameFlat(k, l) && !(k.twinSources || []).includes(name));
+      if (sameAd) l.duplicateOf = `${sameAd.source}:${sameAd.id}`;
+      else if (dup) { l.duplicateOf = `${dup.source}:${dup.id}`; (dup.twinSources ||= []).push(name); }
       db.listings[gid] = l;
       known.push(l);
       if (!seed && !dup) fresh.push(l);
@@ -74,12 +93,15 @@ async function runOnce(db, { send = true } = {}) {
   db.lastCheck = now;
   db.errors = errors;
   let notifyError = null;
-  if (send) {
+  let skipped = 0;
+  if (send && fresh.length) {
+    const sent = await sentRecently();
     for (const l of [...fresh].reverse()) { // oldest first, newest ends on top
-      try { await notify(l); } catch (e) { notifyError = 'ntfy: ' + e.message; }
+      if (sent.has(l.url)) { skipped++; continue; } // another copy of this checker already pushed it
+      try { await notify(l); sent.add(l.url); } catch (e) { notifyError = 'ntfy: ' + e.message; }
     }
   }
-  return { now, counts, errors, seeded, fresh: fresh.length, notifyError };
+  return { now, counts, errors, seeded, fresh: fresh.length, skipped, notifyError };
 }
 
 module.exports = { cfg, runOnce, notify, BASE };
